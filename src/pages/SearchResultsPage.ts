@@ -1,4 +1,4 @@
-import { Locator, Page } from '@playwright/test';
+import { expect, Locator, Page } from '@playwright/test';
 import { SearchResultsPageLocators as L } from '../locators/searchResultsPage.locators';
 import { ProductDetails, SelectionCriteria } from '../types/product.types';
 import { Logger } from '../utils/logger';
@@ -55,18 +55,31 @@ export class SearchResultsPage {
   async waitForResultsLoaded(): Promise<void> {
     this.logger.step('Waiting for search results to load completely');
     await this.page.waitForLoadState('domcontentloaded');
-    await this.page
-      .locator(L.resultsContainer)
-      .waitFor({ state: 'visible', timeout: 30_000 })
-      .catch(() => undefined);
-    await this.page.locator(L.resultCard).first().waitFor({ state: 'visible', timeout: 30_000 });
-    // Let lazy-loaded content (images, prices) settle. Not fatal if it times out.
+    await this.dismissContinueShopping();
+    const cards = this.page.locator(L.resultCard);
+    await expect.poll(async () => {
+      await this.dismissContinueShopping();
+      return await cards.count();
+    }, { timeout: 30_000 }).toBeGreaterThan(0);
     await this.page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {
       this.logger.warn('networkidle not reached within 30s — continuing with the visible results.');
     });
-    const count = await this.page.locator(L.resultCard).count();
+    const count = await cards.count();
     this.logger.info(`Search results loaded. ${count} result card(s) visible on page 1.`);
     await captureScreenshot(this.page, this.outputDir, '03-search-results', this.logger);
+  }
+
+  private async dismissContinueShopping(): Promise<void> {
+    try {
+      const button = this.page.locator('button:has-text("Continue shopping"), a:has-text("Continue shopping")').first();
+      if ((await button.count()) > 0 && (await button.isVisible().catch(() => false))) {
+        await button.click({ timeout: 5_000 });
+        await this.page.waitForLoadState('domcontentloaded').catch(() => undefined);
+        this.logger.info('Dismissed the continue-shopping prompt before waiting for product cards.');
+      }
+    } catch {
+      // Optional Amazon overlay; ignore if absent.
+    }
   }
 
   /** Extracts title, rating, reviews, price, Prime and sponsored status for the first N results. */
@@ -170,12 +183,17 @@ export class SearchResultsPage {
     const context = this.page.context();
     const pagesBefore = context.pages().length;
     const card = this.page.locator(L.resultCard).nth(product.position - 1);
-    await card.locator(L.titleLink).first().click();
-    // Give a possible new tab a moment to appear.
+    const titleLink = card.locator(L.titleLink).first();
+    const popupPromise = context.waitForEvent('page').catch(() => null);
+    await titleLink.click({ timeout: 30_000, force: true });
     await this.page.waitForTimeout(1500);
+    const popup = await popupPromise;
     const pages = context.pages();
     let target: Page = this.page;
-    if (pages.length > pagesBefore) {
+    if (popup) {
+      target = popup;
+      await target.bringToFront();
+    } else if (pages.length > pagesBefore) {
       target = pages[pages.length - 1];
       await target.bringToFront();
     }

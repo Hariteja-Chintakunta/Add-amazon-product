@@ -1,4 +1,4 @@
-import { Locator, Page, expect } from '@playwright/test';
+import { Locator, Page } from '@playwright/test';
 import { HomePageLocators as L } from '../locators/homePage.locators';
 import { Logger } from '../utils/logger';
 import { captureScreenshot } from '../utils/screenshotHelper';
@@ -26,6 +26,7 @@ export class HomePage {
     await this.page.waitForLoadState('domcontentloaded');
     await this.detectCaptcha();
     await this.dismissLocationPopover();
+    await this.dismissContinueShopping();
     const searchBox = await this.getVisibleSearchBox();
     const searchBoxVisible = await searchBox.isVisible().catch(() => false);
     if (searchBoxVisible) {
@@ -77,6 +78,20 @@ export class HomePage {
     }
   }
 
+  /** Best-effort dismiss of the Amazon "Continue shopping" challenge prompt. */
+  private async dismissContinueShopping(): Promise<void> {
+    try {
+      const button = this.page.locator('button:has-text("Continue shopping"), a:has-text("Continue shopping")').first();
+      if ((await button.count()) > 0 && (await button.isVisible().catch(() => false))) {
+        await button.click({ timeout: 5_000 });
+        await this.page.waitForLoadState('domcontentloaded').catch(() => undefined);
+        this.logger.info('Dismissed the continue-shopping prompt.');
+      }
+    } catch {
+      // This prompt is optional and can be absent or replaced by other Amazon overlays.
+    }
+  }
+
   /** Types the product name and submits the search. */
   async search(productName: string): Promise<void> {
     this.logger.step(`Searching for product: "${productName}"`);
@@ -84,12 +99,15 @@ export class HomePage {
     await box.waitFor({ state: 'attached', timeout: 30_000 });
     await box.click({ timeout: 15_000 }).catch(() => undefined);
     await box.fill(productName, { timeout: 15_000 }).catch(() => undefined);
-    const searchButton = this.page.locator(L.searchButton).first();
-    await withRetry(() => searchButton.click(), {
-      label: 'click search button',
-      logger: this.logger,
-    });
+    await withRetry(
+      () => box.press('Enter', { delay: 200 }),
+      {
+        label: 'submit search via Enter',
+        logger: this.logger,
+      },
+    );
     await this.page.waitForLoadState('domcontentloaded');
+    await this.dismissContinueShopping();
     this.logger.info(`Search submitted for "${productName}".`);
     await captureScreenshot(this.page, this.outputDir, '02-search-submitted', this.logger);
   }
